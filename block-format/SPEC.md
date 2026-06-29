@@ -216,15 +216,31 @@ This binds the signature to the specific volume and manifest. Signers compute
 
 ### 7.4 Trust store
 
-Each node holds an Ed25519 trust store assembled from:
+A node's trust store is **derived**, not hardcoded. It is computed at runtime from
+three sources:
 
-- **Project keys** — bundled into the firmware/build (the project / "inner cabal"
-  content updaters). Trusted for content/firmware updates on any project node.
-- **Owner key(s)** — added at provisioning. Trusted for updates on that node.
+- **Root keys** — a small set of Ed25519 keys (e.g. 5) **embedded immutably in the
+  firmware**, held offline/air-gapped by separate custodians. They are the *only*
+  hardcoded trust anchor. They do not sign content; they sign the **key-set** (§7.6),
+  and only an **M-of-N quorum** (e.g. 3-of-5, recorded as `root_quorum` in firmware)
+  is accepted.
+- **Project keys** — delivered via the signed key-set (§7.6), **not** baked into the
+  firmware. Each carries explicit capabilities (`content`, `management`). These let
+  trusted updaters refresh content on any project node, and are addable/revocable
+  without a firmware rebuild.
+- **Owner key(s)** — added locally at provisioning. Trusted for updates and
+  management on that node.
+
+The effective trust store is:
+
+```
+effective = owner_keys ∪ { k ∈ current_keyset.keys : k not revoked, within validity }
+```
 
 For *management/SSH* access the same keys are used, but the policy differs (see
-README → Security & Trust): the owner key is always authorized; project keys gain
-management access only when the owner **enrolls** the node.
+README → Security & Trust): the owner key is always authorized; project keys grant
+management access only if they carry the `management` capability **and** the owner
+has enrolled the node. Capabilities are enforced per §7.6.4.
 
 ### 7.5 Verification procedure (node boot / mount)
 
@@ -240,6 +256,99 @@ management access only when the owner **enrolls** the node.
    or re-signing an update.
 
 A volume failing steps 1–3 MUST NOT be served.
+
+### 7.6 Trust set — signed monotonic key-set
+
+The set of valid **project** keys is not hardcoded; it is carried in a signed,
+versioned **key-set** document so keys can be added or revoked without reflashing
+firmware. The firmware embeds only the **root keys** and the initial key-set.
+
+#### 7.6.1 Key-set document (CBOR, canonical RFC 8949 §4.2)
+
+```
+{
+  "v":       1,                 // key-set schema version (this format)
+  "version": 42,                // MONOTONIC counter — the security-critical field
+  "created_unix": 1719600000,
+  "keys": [
+    {
+      "id":         "a1b2c3d4e5f60718",   // hex of first 8 bytes of SHA-256(pubkey)
+      "pubkey":     h'…32 bytes…',
+      "caps":       ["content", "management"],  // subset of {content, management}
+      "not_before": 1719600000,            // optional; 0/absent = no lower bound
+      "not_after":  1782758400,            // optional; 0/absent = no expiry
+      "label":      "courier-eu-1"         // human label, optional, not trusted
+    }
+    // ...
+  ],
+  "revoked": ["deadbeef00000000"]          // optional explicit deny-list of key ids
+}
+```
+
+- `version` is a strictly increasing integer across the project's history. It is the
+  anchor for rollback protection (§7.6.3).
+- `caps` defines what a key may authorize. Root keys are **not** listed here; they
+  may not sign content or hold management access via the key-set.
+- Root keys themselves can only be changed by a firmware update (rare, catastrophic,
+  accepted).
+
+#### 7.6.2 Key-set signature
+
+The key-set is signed exactly like a manifest (§7.2 signature record format), but the
+signing input is:
+
+```
+"BBKEYSv1" || version (8, LE) || sha256(canonical key-set body bytes)
+```
+
+A key-set is valid only if it carries **at least `root_quorum` signatures from
+distinct embedded root keys**, each verifying over the above input.
+
+#### 7.6.3 Update rules (node side)
+
+A node persists `current_keyset_version` and the current key-set. On receiving a
+candidate key-set:
+
+1. Verify it carries ≥ `root_quorum` valid, distinct **root** signatures (§7.6.2).
+2. Verify `candidate.version > current_keyset_version`. **Reject `≤`** — this blocks
+   rollback/downgrade attacks that would re-admit a revoked key.
+3. Atomically replace the stored key-set and bump `current_keyset_version`.
+
+Key-sets are distributed like content: they MAY ride inside update bundles (§9) or be
+fetched standalone. Because they are root-signed, they are trusted independent of who
+delivers them.
+
+#### 7.6.4 Capability & validity enforcement
+
+When checking any signature (content update, firmware update, or management auth) by a
+project key `k`:
+
+- `k` must be present in the current key-set and **absent** from its `revoked` list.
+- The action's required capability must be in `k.caps` (`content` for update bundles,
+  `management` for shell/management).
+- If `not_before`/`not_after` are set, the node's clock must fall within the window
+  (see §7.7 on clock caveats).
+
+Owner keys are governed by local policy, not the key-set.
+
+### 7.7 Revocation, rotation & limitations
+
+- **Revoking a project key**: publish key-set `version + 1` with the key removed and
+  its id added to `revoked`, root-quorum-signed. Once a node ingests it, the key can
+  no longer authorize anything on that node.
+- **Fundamental limitation**: a node that never receives a newer key-set keeps
+  trusting the old one. True revocation requires the node to be reached (couriers
+  carry the latest key-set; every content bundle SHOULD embed it). This is inherent
+  to offline-first systems and MUST be documented for operators, not hidden.
+- **Defense in depth**: short `not_after` windows let project keys auto-expire even on
+  stale nodes — but only where the node has a trustworthy clock (RTC, GPS, or NTP
+  while briefly online). Nodes without a reliable clock MUST treat `not_after` as
+  advisory and rely on key-set propagation for revocation.
+- **Root quorum** (`root_quorum` of N) ensures no single root-key compromise can mint
+  a malicious key-set. Root keys stay offline; rotating them is a firmware update.
+- **Operational guidance**: issue most courier keys with `content` capability only;
+  grant `management` narrowly; rotate project keys proactively on a schedule, not just
+  on compromise.
 
 ---
 
@@ -276,10 +385,15 @@ simplest correct model); manifest *deltas* are a future optimization.
 - `new_manifest` — the full replacement manifest (extent table + metadata).
 - `data_segments[]` — new/changed item blobs with their target offsets.
 - `signature` — Ed25519 over `"BBLKUPDv1" || target_uuid || new_manifest_sha256`,
-  by a key in the node's trust store.
+  by a key in the node's trust store **bearing the `content` capability** (§7.6.4).
+- `keyset` *(optional)* — an embedded key-set (§7.6.1). Bundles SHOULD carry the
+  latest key-set so revocations propagate wherever content goes.
 
 **Apply procedure (atomic-ish):**
-1. Verify the bundle signature against the trust store. Reject if untrusted.
+0. If a `keyset` is present, process it per §7.6.3 *before* anything else (so the
+   bundle's own signature is checked against the freshest trust set).
+1. Verify the bundle signature against the trust store. Reject if untrusted or if the
+   signing key lacks the `content` capability.
 2. If `base_manifest_sha256 != 0`, confirm it matches the current manifest.
 3. Verify each `data_segment` against its `content_sha256` in `new_manifest`.
 4. Write new data segments to Region 3 (and replica, if present).
@@ -306,8 +420,6 @@ simplest correct model); manifest *deltas* are a future optimization.
 - **Multi-extent items** for large files and update-in-place without rewriting all
   of Region 3.
 - **Manifest deltas** to avoid resending the full index on small updates.
-- **Key revocation / rotation** mechanism for project keys (CRL-style list bundled
-  in firmware updates? signed key-set with a monotonic version?).
 - **Cross-node aggregation contract**: how the synth presents `item_id` namespaces
   from multiple volumes without collision (likely `volume_uuid` + `item_id`).
 - Whether to offer **optional at-rest encryption** for sensitive regional content

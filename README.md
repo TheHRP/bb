@@ -192,12 +192,15 @@ The trust model separates three concerns that are easy to conflate: **discovery*
 
 ### The key hierarchy
 
-Every node carries an Ed25519 **trust store**, established as follows:
+Authority is rooted in a tiny set of **offline root keys** and delegated through a **signed, monotonically-versioned key-set**:
 
-- **Project keys** — a small set of project ("inner cabal") public keys **bundled into the build/firmware**. These let trusted content updaters refresh content on *any* project node as they travel between sites.
-- **Owner key** — the operator's own public key, added at **provisioning time**. This lets an operator update content on *their own* nodes.
+- **Root keys** — a small set (e.g. 5) of Ed25519 keys held **offline / air-gapped** by separate custodians. The *only* keys baked immutably into firmware. They do nothing day-to-day except sign the key-set, and require an **M-of-N quorum** (e.g. 3-of-5) to do so—so no single root-key compromise can rewrite trust.
+- **Project key-set** — a signed document listing the currently-valid project ("inner cabal") keys and each key's capabilities (content-update vs. management). Distributed like content; a node accepts only a **strictly higher version** than it already holds (rollback-proof). Adding or revoking a project key is a new key-set version, **not a firmware rebuild**.
+- **Owner key** — the operator's own public key, added at **provisioning time**. Trusted locally for updates (and management) on that node.
 
-A node's effective trust = `project_keys ∪ owner_keys`.
+A node's effective trust at any moment = `owner_keys ∪ (valid project keys from the current key-set)`. Full format and rules: [`block-format/SPEC.md`](block-format/SPEC.md) §7.
+
+> **Be careful with project keys.** Most couriers should hold keys with the *content* capability only (they can refresh content, not get a shell). Management capability is granted narrowly. Root keys stay offline and quorum-protected. A compromised project key is handled by publishing a new key-set version that revokes it.
 
 ### Content & update integrity (most important)
 
