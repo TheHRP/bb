@@ -10,23 +10,30 @@ pub const SUPERBLOCK_MAGIC: [u8; 4] = *b"BBLK";
 pub const EXTENT_TABLE_MAGIC: [u8; 4] = *b"BMFT";
 pub const SIGNATURE_MAGIC: [u8; 4] = *b"BSIG";
 pub const KEYSET_MAGIC: [u8; 4] = *b"BKEY";
+pub const BUNDLE_MAGIC: [u8; 4] = *b"BUPD";
 
 // ---- Versions / algorithms ----------------------------------------------
 
 pub const FORMAT_VERSION: u16 = 1;
 pub const KEYSET_FORMAT: u16 = 1;
+pub const BUNDLE_FORMAT: u16 = 1;
 pub const DIGEST_SHA256: u8 = 1;
 pub const SIG_ED25519: u8 = 1;
 
 // ---- Sizes ---------------------------------------------------------------
 
-pub const SUPERBLOCK_LEN: usize = 128;
-pub const SUPERBLOCK_CRC_RANGE: usize = 124;
+pub const SUPERBLOCK_LEN: usize = 160;
+pub const SUPERBLOCK_CRC_RANGE: usize = 132;
 pub const EXTENT_HEADER_LEN: usize = 32;
 pub const EXTENT_RECORD_LEN: usize = 52;
 pub const SIG_HEADER_LEN: usize = 8;
 pub const SIG_RECORD_LEN: usize = 96; // 32-byte pubkey + 64-byte signature
 pub const KEYSET_HEADER_LEN: usize = 12;
+pub const BUNDLE_HEADER_LEN: usize = 88;
+pub const BUNDLE_SEGMENT_REC_LEN: usize = 12; // item_id (u32) + payload_len (u64)
+/// Max segments (changed/new items) one bundle may carry. Larger updates should
+/// ship a full content pack. Bounds the stack arrays in the no_std apply path.
+pub const MAX_BUNDLE_SEGMENTS: usize = 64;
 pub const DEFAULT_BLOCK_SIZE: u32 = 4096;
 
 // ---- Signing-input domain separators ------------------------------------

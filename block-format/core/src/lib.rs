@@ -17,6 +17,7 @@
 //! ```
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+pub mod bundle;
 pub mod crypto;
 pub mod error;
 pub mod format;
@@ -25,6 +26,7 @@ pub mod manifest;
 pub mod superblock;
 pub mod verify;
 
+pub use bundle::{verify_bundle, TrustConfig, VerifiedBundle};
 pub use error::{Error, Result};
 pub use format::{CAP_CONTENT, CAP_MANAGEMENT};
 pub use keyset::{key_id, verify_keyset, KeyEntry, KeySet};

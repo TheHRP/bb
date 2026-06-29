@@ -22,6 +22,8 @@ pub struct Superblock {
     pub replica_offset: u64,
     pub item_count: u32,
     pub manifest_sha256: [u8; 32],
+    /// Total allocatable bytes; the upper bound for in-place update allocation.
+    pub volume_capacity: u64,
 }
 
 pub const FLAG_REPLICA_PRESENT: u16 = 1 << 0;
@@ -72,7 +74,35 @@ impl Superblock {
             replica_offset: u64le(hdr, 80)?,
             item_count: u32le(hdr, 88)?,
             manifest_sha256: array32(hdr, 92)?,
+            volume_capacity: u64le(hdr, 124)?,
         })
+    }
+
+    /// Serialize this superblock to its fixed 128/160-byte header, computing the
+    /// CRC. Shared by the authoring builder and the in-place update path so the
+    /// node, not the bundle author, always controls the committed superblock.
+    pub fn encode(&self) -> [u8; SUPERBLOCK_LEN] {
+        let mut sb = [0u8; SUPERBLOCK_LEN];
+        sb[0..4].copy_from_slice(&SUPERBLOCK_MAGIC);
+        sb[4..6].copy_from_slice(&self.format_version.to_le_bytes());
+        sb[6..8].copy_from_slice(&self.flags.to_le_bytes());
+        sb[8..24].copy_from_slice(&self.volume_uuid);
+        sb[24..32].copy_from_slice(&self.created_unix.to_le_bytes());
+        sb[32..36].copy_from_slice(&self.block_size.to_le_bytes());
+        sb[36] = self.digest_algo;
+        sb[37] = self.sig_algo;
+        sb[40..48].copy_from_slice(&self.sig_offset.to_le_bytes());
+        sb[48..56].copy_from_slice(&self.sig_length.to_le_bytes());
+        sb[56..64].copy_from_slice(&self.manifest_offset.to_le_bytes());
+        sb[64..72].copy_from_slice(&self.manifest_length.to_le_bytes());
+        sb[72..80].copy_from_slice(&self.data_offset.to_le_bytes());
+        sb[80..88].copy_from_slice(&self.replica_offset.to_le_bytes());
+        sb[88..92].copy_from_slice(&self.item_count.to_le_bytes());
+        sb[92..124].copy_from_slice(&self.manifest_sha256);
+        sb[124..132].copy_from_slice(&self.volume_capacity.to_le_bytes());
+        let crc = crc32(&sb[..SUPERBLOCK_CRC_RANGE]);
+        sb[132..136].copy_from_slice(&crc.to_le_bytes());
+        sb
     }
 
     /// Borrow the manifest payload (`manifest_length` bytes at `manifest_offset`).

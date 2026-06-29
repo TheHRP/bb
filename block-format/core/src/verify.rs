@@ -8,13 +8,13 @@ use crate::manifest::{ExtentRecord, Manifest};
 use crate::superblock::{slice_u64, Superblock};
 
 /// Iterate the `(pubkey, signature)` records of a `BSIG` signature block.
-struct SignatureBlock<'a> {
+pub(crate) struct SignatureBlock<'a> {
     count: u16,
     body: &'a [u8],
 }
 
 impl<'a> SignatureBlock<'a> {
-    fn parse(buf: &'a [u8]) -> Result<SignatureBlock<'a>> {
+    pub(crate) fn parse(buf: &'a [u8]) -> Result<SignatureBlock<'a>> {
         let hdr = take(buf, 0, SIG_HEADER_LEN)?;
         if hdr[0..4] != SIGNATURE_MAGIC {
             return Err(Error::BadMagic);
@@ -36,35 +36,34 @@ impl<'a> SignatureBlock<'a> {
 
 /// Build the manifest signing input (SPEC §7.3):
 /// `"BBLKSIGv1" || volume_uuid || format_version(LE) || manifest_sha256`.
-fn manifest_signing_input(sb: &Superblock) -> [u8; 9 + 16 + 2 + 32] {
+pub(crate) fn manifest_signing_input(
+    volume_uuid: &[u8; 16],
+    format_version: u16,
+    manifest_sha256: &[u8; 32],
+) -> [u8; 9 + 16 + 2 + 32] {
     let mut msg = [0u8; 9 + 16 + 2 + 32];
     msg[0..9].copy_from_slice(MANIFEST_SIG_PREFIX);
-    msg[9..25].copy_from_slice(&sb.volume_uuid);
-    msg[25..27].copy_from_slice(&sb.format_version.to_le_bytes());
-    msg[27..59].copy_from_slice(&sb.manifest_sha256);
+    msg[9..25].copy_from_slice(volume_uuid);
+    msg[25..27].copy_from_slice(&format_version.to_le_bytes());
+    msg[27..59].copy_from_slice(manifest_sha256);
     msg
 }
 
-/// Verify the manifest signature against a set of trusted public keys.
-///
-/// Returns the index (within `trusted`) of the first key that produced a valid
-/// signature. Distinguishes a genuine-but-untrusted signer
+/// Verify that at least one signature in the block is valid *and* its signer
+/// satisfies `trusted`. Distinguishes a genuine-but-untrusted signer
 /// ([`Error::UntrustedSigner`]) from a forged/corrupt signature
 /// ([`Error::SignatureInvalid`]).
-pub fn verify_manifest_signature(
-    sb: &Superblock,
-    sig_block: &[u8],
-    trusted: &[[u8; 32]],
-) -> Result<usize> {
+pub(crate) fn verify_signature_block<F>(msg: &[u8], sig_block: &[u8], trusted: F) -> Result<()>
+where
+    F: Fn(&[u8; 32]) -> bool,
+{
     let block = SignatureBlock::parse(sig_block)?;
-    let msg = manifest_signing_input(sb);
-
     let mut saw_untrusted = false;
     for i in 0..block.count as usize {
         let (pubkey, sig) = block.record(i)?;
-        if ed25519_verify(&pubkey, &msg, &sig) {
-            if let Some(idx) = trusted.iter().position(|k| k == &pubkey) {
-                return Ok(idx);
+        if ed25519_verify(&pubkey, msg, &sig) {
+            if trusted(&pubkey) {
+                return Ok(());
             }
             saw_untrusted = true;
         }
@@ -74,6 +73,16 @@ pub fn verify_manifest_signature(
     } else {
         Error::SignatureInvalid
     })
+}
+
+/// Verify the manifest signature against a flat set of trusted public keys.
+pub fn verify_manifest_signature(
+    sb: &Superblock,
+    sig_block: &[u8],
+    trusted: &[[u8; 32]],
+) -> Result<()> {
+    let msg = manifest_signing_input(&sb.volume_uuid, sb.format_version, &sb.manifest_sha256);
+    verify_signature_block(&msg, sig_block, |pk| trusted.iter().any(|k| k == pk))
 }
 
 /// Full volume verification (SPEC §7.5 steps 1–4).

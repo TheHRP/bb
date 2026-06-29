@@ -28,11 +28,18 @@ server-only because nodes never create content, they only verify it.
 - **Key-set** (SPEC §7.6): CBOR parse, root-quorum signature check, strict
   monotonic rollback protection, capability + validity enforcement, allocation-free
   key collection.
-- **Authoring**: `VolumeBuilder` (lay out → hash → sign → emit image) and
-  `KeySetBuilder` (build → root-sign envelope).
+- **Update bundles** (SPEC §9): copy-on-write in-place updates. The node validates
+  the author's layout (in-bounds, block-aligned, no overlap with kept items, within
+  `volume_capacity`), verifies the new manifest's signature + every segment digest,
+  processes an embedded key-set first, then executes with the superblock swap as the
+  atomic commit. `replace` / `add` / `delete`, with deleted space auto-reclaimed.
+- **Authoring**: `VolumeBuilder` (lay out → hash → sign → emit image),
+  `KeySetBuilder` (build → root-sign envelope), and `BundleBuilder` (model free
+  space → allocate → sign → emit bundle).
 
-Not yet implemented (tracked in SPEC §9/§11): update-bundle apply, manifest deltas,
-multi-extent items, replica handling.
+Not yet implemented (tracked in SPEC §9/§11): manifest deltas, multi-extent items,
+replica handling, on-device (SD) bundle executor (the in-memory `execute` is the
+reference; firmware writes the same plan to storage with crash-safe ordering).
 
 ## Build & test
 

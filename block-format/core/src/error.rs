@@ -26,6 +26,8 @@ pub enum Error {
     QuorumNotMet,
     /// A candidate key-set's version was not strictly greater than the current one.
     KeysetRollback,
+    /// An update bundle's `base_manifest_sha256` did not match the current manifest.
+    BaseMismatch,
     /// More keys/revocations than this build's fixed capacity can hold.
     CapacityExceeded,
     /// The required capability is absent, the key is revoked, or it is outside
