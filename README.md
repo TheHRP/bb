@@ -188,21 +188,40 @@ When a node has any upstream connection, it joins the [Yggdrasil](https://yggdra
 
 ## Security & Trust
 
+The trust model separates three concerns that are easy to conflate: **discovery** (joining a WiFi), **authority** (the cryptographic key hierarchy), and **ownership** (who controls a given node). A single Ed25519 trust store provides authority for both signed updates *and* management access. See [`block-format/SPEC.md`](block-format/SPEC.md) for the on-the-wire details.
+
+### The key hierarchy
+
+Every node carries an Ed25519 **trust store**, established as follows:
+
+- **Project keys** — a small set of project ("inner cabal") public keys **bundled into the build/firmware**. These let trusted content updaters refresh content on *any* project node as they travel between sites.
+- **Owner key** — the operator's own public key, added at **provisioning time**. This lets an operator update content on *their own* nodes.
+
+A node's effective trust = `project_keys ∪ owner_keys`.
+
 ### Content & update integrity (most important)
 
 The archive's value depends on operators being unable to silently poison it. Therefore:
 
-- **All content and firmware updates are cryptographically signed.** A node applies an update only if it is signed by a trusted key—**regardless of who can reach the management interface.** This is the primary integrity control.
-- **Local content is verified against per-block checksums** recorded in the manifest at preparation time.
+- **All content and firmware updates are cryptographically signed.** A node applies an update only if its bundle is signed by a key in the trust store—**regardless of who can reach the management interface.** This is the primary integrity control.
+- **Both project keys and the owner key may sign content updates.** Couriers update project nodes; owners update their own.
+- **Local content is verified against per-item checksums** recorded in the (signed) manifest at preparation time.
 
-### Management authentication
+### Discovery vs. authentication
 
-> ⚠️ **A single shared, well-known WiFi password is not authentication.** A common discovery SSID (`bruce`) makes devices easy to find, but anyone who knows the project knows the password. Network association MUST NOT, by itself, grant the ability to rewrite content.
+> ⚠️ **A shared WiFi password is not authentication.** It is fine—intended, even—for the `bruce` SSID and its password to be publicly documented, *because association grants nothing.*
 
-Recommended model:
-- The `bruce` SSID handles **discovery/association** only.
-- **Management actions require a second factor**: an SSH key, or a per-device token derived as `HMAC(master_secret, device_id)` so credentials are not shared fleet-wide.
-- Signed updates (above) mean that even a fully compromised management channel cannot alter the archive's contents undetected.
+- The **`bruce` SSID** (optionally suffixed per device, e.g. `bruce-<shortid>`) handles **discovery/association only**. Do not hide it; obscurity adds no security and hurts usability.
+- **Management actions require a trusted key**, not WiFi access. SSH/management auth uses the *same* Ed25519 trust list as updates:
+  - **Owner key** → always authorized for management on its own node.
+  - **Project keys** → authorized for management **only if the owner enrolls** the node (opt-in; see below).
+- Because updates are independently signed, even a fully compromised management channel cannot alter the archive's contents undetected.
+
+### Ownership & enrollment
+
+- **DIY / independent operators** own their nodes outright: they hold the owner key and full management control. Project keys are bundled for *content updates* but are **not** granted shell/management access by default.
+- **Joining the project fleet is opt-in.** An operator enrolls a node by adding the project key to its management-auth set and registering the node's Yggdrasil public key with the project. We *request* that independent operators enroll—so the fleet can be statused and helped—but we do not require it, and we never gain management access without the owner's action.
+- This intentionally resolves the "earn the password" tension: there is no secret to leak, bad actors gain nothing by associating, and trust is expressed through keys rather than network access.
 
 ### Operational Security
 
