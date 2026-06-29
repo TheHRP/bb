@@ -1,0 +1,19 @@
+[package]
+name = "bb-node"
+description = "Portable node firmware logic for Bruce's Bunker: mount, verify, and serve a block-format volume over HTTP. Hardware I/O is abstracted behind the Storage trait."
+version = "0.1.0"
+edition = "2021"
+license = "CC0-1.0"
+repository = "https://github.com/TheHRP/bb"
+
+[dependencies]
+bb-block-core = { path = "../block-format/core" }
+sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# Host-only: author test volumes to mount and serve.
+bb-block = { path = "../block-format/authoring" }
+
+[features]
+default = []
+std = ["bb-block-core/std"]
