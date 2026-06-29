@@ -1,0 +1,17 @@
+[package]
+name = "bb-block-core"
+description = "no_std read + verification core for the Bruce's Bunker block format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+minicbor = { workspace = true }
+
+[features]
+default = []
+# Enables std-only conveniences (Error: std::error::Error). The core is no_std by default.
+std = []

@@ -93,11 +93,18 @@ offset (`replica_offset`, 0 if absent).
 | 80 | 8 | `replica_offset` | offset of replica superblock, or 0 |
 | 88 | 4 | `item_count` | number of content items in the manifest |
 | 92 | 32 | `manifest_sha256` | SHA-256 of the manifest payload bytes |
-| 124 | 4 | `header_crc32` | CRC-32 of bytes [0,124) for quick sanity check |
-| 128 | … | reserved | zero to end of block |
+| 124 | 8 | `volume_capacity` | total allocatable bytes (the arena upper bound; ≥ image length). Bounds in-place updates (§9). |
+| 132 | 4 | `header_crc32` | CRC-32 of bytes [0,132) for quick sanity check |
+| 136 | … | reserved | zero to end of block |
 
 A reader validates `magic`, `format_version`, and `header_crc32`, then trusts
 `manifest_sha256` only **after** the signature in Region 1 verifies (§7).
+
+`volume_capacity` is set at preparation time to the usable size of the medium
+(e.g. the card size, rounded down to a block). The region between the highest
+referenced byte and `volume_capacity` is free space available to update bundles
+(§9). The superblock structure occupies bytes `[0, block_size)`; allocation never
+touches block 0.
 
 ---
 
@@ -373,34 +380,88 @@ I/O buffer.
 
 ## 9. Update bundles
 
-A field update is a signed, self-contained bundle applied by the `update` library.
-v0.1 supports **full-manifest replacement** with incremental data append (the
-simplest correct model); manifest *deltas* are a future optimization.
+A volume is updated in the field by a signed, self-contained **update bundle**,
+without rewriting the whole medium. There are two complementary distribution units:
 
-**Bundle contents:**
-- `target_uuid` — volume the bundle applies to (or a wildcard for fleet content
-  packs intended for any project node).
-- `base_manifest_sha256` — the manifest the bundle expects to replace (optimistic
-  concurrency; `0` = unconditional).
-- `new_manifest` — the full replacement manifest (extent table + metadata).
-- `data_segments[]` — new/changed item blobs with their target offsets.
-- `signature` — Ed25519 over `"BBLKUPDv1" || target_uuid || new_manifest_sha256`,
-  by a key in the node's trust store **bearing the `content` capability** (§7.6.4).
+- **Full content pack** — a complete signed volume image written to the medium
+  (`dd`). The provisioning/initial-seed unit; atomic and fragmentation-free.
+- **Update bundle** — a small signed patch applied in place by the `update` library.
+  The field-update unit, since terabytes cannot be re-shipped over an ESP32 /
+  Yggdrasil link.
+
+### 9.1 The allocation model
+
+The manifest's extent table already records every occupied range, so it doubles as
+the volume's allocation map. With the superblock's `volume_capacity` as the upper
+bound:
+
+```
+free space = [block_size, volume_capacity)  minus  every range the current
+             superblock references (data extents ∪ manifest region ∪ sig region)
+```
+
+This makes the three update operations fall out naturally:
+
+- **Replace, same-or-smaller** — reuse the item's slot.
+- **Replace larger, or add a new item** — place it in free space (a reclaimed
+  deletion hole, or the tail before `volume_capacity`).
+- **Delete** — drop the record; its range is simply no longer referenced, so it
+  becomes free on the next update. No GC bookkeeping.
+
+Updates are **copy-on-write**: changed data, the new manifest, and the new signature
+block are written to *free* space, leaving the currently-referenced bytes intact.
+The **superblock swap is the single atomic commit** — a torn write before it leaves
+the old volume fully valid; one after it is the new volume. Dead space left by a
+previous update (old manifest/sig, replaced data) is unreferenced by the new
+superblock and is therefore reclaimed automatically next time. When free space is
+exhausted, the fallback is to rebuild a full content pack (compaction).
+
+### 9.2 Bundle contents
+
+Authorship of the new manifest is what authorizes the update: it carries a `BSIG`
+signature block (§7.2) by a trusted key bearing the `content` capability (§7.6.4),
+over the standard manifest signing input (§7.3), which is bound to `volume_uuid` —
+preventing cross-volume replay. The bundle therefore needs no separate signature.
+
+- `target_uuid` — the volume this applies to (must equal the volume's `volume_uuid`).
+- `base_manifest_sha256` — manifest the author built against (optimistic concurrency;
+  `0` = unconditional). Advisory: the new manifest is complete, not a delta.
+- `new_manifest` — the complete replacement manifest (extent table + metadata), with
+  records pointing at final on-volume offsets.
+- `new_sig_block` — `BSIG` signatures over `new_manifest` (this is the authorization).
+- `manifest_target` / `sig_target` — the free-space offsets at which to write the new
+  manifest and signature block.
+- `segments[]` — `(item_id, bytes)` for every new/changed item; each item's target
+  offset and length come from its `new_manifest` record.
 - `keyset` *(optional)* — an embedded key-set (§7.6.1). Bundles SHOULD carry the
-  latest key-set so revocations propagate wherever content goes.
+  latest key-set so revocations propagate wherever content travels.
 
-**Apply procedure (atomic-ish):**
-0. If a `keyset` is present, process it per §7.6.3 *before* anything else (so the
-   bundle's own signature is checked against the freshest trust set).
-1. Verify the bundle signature against the trust store. Reject if untrusted or if the
-   signing key lacks the `content` capability.
-2. If `base_manifest_sha256 != 0`, confirm it matches the current manifest.
-3. Verify each `data_segment` against its `content_sha256` in `new_manifest`.
-4. Write new data segments to Region 3 (and replica, if present).
-5. Write the new manifest, then the new signature block, then update the superblock
-   (`manifest_offset/length`, `manifest_sha256`, `item_count`) **last** — the
-   superblock swap is the commit point. A torn write leaves the old superblock
-   valid (write the replica first, primary last).
+### 9.3 Apply procedure
+
+The author computes the layout; the node **validates and executes** it (a deliberately
+simple, allocation-free path for the ESP32).
+
+0. If a `keyset` is present, process it per §7.6.3 first, so trust is fresh.
+1. Verify `new_sig_block` over `new_manifest` against the trust store, requiring a
+   signer with the `content` capability. Reject otherwise (untrusted / lacking cap).
+2. `target_uuid` must equal the current `volume_uuid`. If `base_manifest_sha256 != 0`,
+   it must equal the current `manifest_sha256`.
+3. Verify each segment's bytes against the `content_sha256` of its `new_manifest`
+   record (and that its length matches).
+4. **Safety check** every write region — each segment, plus `manifest_target` and
+   `sig_target` — is block-aligned, lies within `[block_size, volume_capacity)`, does
+   not overlap any other write region, and does not overlap any **kept** item (a
+   `new_manifest` record with no segment, i.e. unchanged data that must survive).
+   Reject on any violation. Every `new_manifest` record must be either supplied as a
+   segment or be a kept item whose range already holds matching bytes.
+5. Write all segments, then the new manifest, then the new signature block — all into
+   free space. None of these touch currently-referenced bytes.
+6. Compute and write the new superblock last (new `manifest_offset/length`,
+   `sig_offset/length`, `manifest_sha256`, `item_count`; `volume_capacity` unchanged).
+   This is the commit point. Write the replica superblock (if present) before the
+   primary.
+
+A failure at any step before 6 leaves the volume unchanged and valid.
 
 ---
 
