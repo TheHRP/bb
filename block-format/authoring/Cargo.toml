@@ -1,0 +1,13 @@
+[package]
+name = "bb-block"
+description = "Authoring (build, sign, write) for the Bruce's Bunker block format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bb-block-core = { path = "../core" }
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["std"] }
+minicbor = { version = "0.24", features = ["alloc"] }
